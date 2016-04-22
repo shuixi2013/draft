@@ -1,6 +1,13 @@
-Toy: Count Comment Lines
-=======================
+# Draft Collection
 
-This is a toy.
+各种小手稿的集合。
+
+有时突然就想写点什么。
+
+## Draft List
+
+1. ### Count code
 
 It can compute the comment/code/mixed/blank lines with a C file.
+
+`./count_comment_lines/`
