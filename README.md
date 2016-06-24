@@ -8,14 +8,20 @@ Draft Collection
 Draft List
 ---
 
-1. Count code
+- Count code
 
   It can compute the comment/code/mixed/blank lines with a C file.
 
   `./count_comment_lines/`
 
-1. ARP Firewall
+- ARP Firewall
 
   A network firewall for ARP attack.
 
   `./arpt_firewall`
+
+- Games
+
+  A collection of my little games.
+
+  `./game`
