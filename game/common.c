@@ -37,6 +37,7 @@ static void init(void)
     initscr();
     cbreak();
     noecho();
+    curs_set(0);
 
     initGOL();
     initMarbles();

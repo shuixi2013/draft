@@ -41,7 +41,7 @@ typedef struct _BAT
 /*
  * Variables
  */
-static int  g_round = 0;
+static int  g_level = 0;
 static int  g_score = 0;
 static BALL g_ball;
 static BAT  g_bat;
@@ -53,7 +53,8 @@ static bool g_gameOver = FALSE;
  */
 static void drawMap(int maxY, int maxX);
 static void initMap(int maxY, int maxX);
-static void calMap(int maxY, int maxX, char key);
+static void calBall(int maxY, int maxX);
+static void calBat(int maxY, int maxX, char key);
 static void gameOver(int maxY, int maxX);
 
 
@@ -75,7 +76,8 @@ void* graphThread(void* unused)
         clear();
         drawMap(y, x);
         refresh();
-        usleep(100);
+        calBall(y, x);
+        usleep(100000);
     }
 
     gameOver(y, x);
@@ -94,20 +96,20 @@ static void start(void)
 
     pthread_create(&graphThreadID, NULL, &graphThread, NULL);
 
-    while (TRUE) {
-        //if (halfdelay(1) != ERR) {
+    while (!g_gameOver) {
+        if (halfdelay(5) != ERR) {
             key = getch();
             if (key == 'q') {
+                cbreak();
                 g_gameOver = TRUE;
                 break;
             } else {
-                calMap(y, x, key);
+                calBat(y, x, key);
             }
-        //}
+        }
     }
 
     pthread_join(graphThreadID, NULL);
-    cbreak();
 }
 
 static void drawInfo(int maxY, int maxX)
@@ -117,10 +119,8 @@ static void drawInfo(int maxY, int maxX)
     if (maxX < 15 || maxY < 3) {
         return;
     }
-    mvprintw(y++, maxX - 15, "Round %d.", g_round);
-    mvprintw(y++, maxX - 15, "Score %d.", g_round);
-    mvprintw(y++, maxX - 15, "ball %d %d.", g_ball.position.x, g_ball.position.y);
-    mvprintw(y++, maxX - 15, "bat %d %d.", g_bat.position.x, g_bat.position.y);
+    mvprintw(y++, maxX - 15, "Level %d.", g_level);
+    mvprintw(y++, maxX - 15, "Score %d.", g_score);
 }
 
 static void drawBall(int maxY, int maxX)
@@ -142,8 +142,8 @@ static void drawBat(int maxY, int maxX)
 static void drawMap(int maxY, int maxX)
 {
     drawInfo(maxY, maxX);
-    drawBat(maxY, maxX);
     drawBall(maxY, maxX);
+    drawBat(maxY, maxX);
 }
 
 static void gameOver(int maxY, int maxX)
@@ -154,12 +154,10 @@ static void gameOver(int maxY, int maxX)
     g_gameOver = TRUE;
     clear();
     mvprintw(y++, x - 15, "Game Over");
-    mvprintw(y++, x - 5, "Round %d.", g_round);
-    mvprintw(y++, x - 5, "Score %d.", g_round);
+    mvprintw(y++, x - 5, "Level %d.", g_level);
+    mvprintw(y++, x - 5, "Score %d.", g_score);
     refresh();
-    cbreak();
     getch();
-    initMap(maxY, maxX);
 }
 
 static void calBall(int maxY, int maxX)
@@ -170,8 +168,13 @@ static void calBall(int maxY, int maxX)
                     g_ball.position.x <= g_bat.position.x + g_bat.len) {
                 g_ball.position.y = maxY - 1;
                 g_ball.speed.y *= -1;
+                g_score++;
+                if (g_bat.len > 5) {
+                    g_level++;
+                    g_bat.len--;
+                }
             } else {
-                gameOver(maxY, maxX);
+                g_gameOver = TRUE;
             }
         } else {
             g_ball.position.y += g_ball.speed.y;
@@ -207,7 +210,7 @@ static void calBat(int maxY, int maxX, char key)
     switch (key) {
         case 'a':
             if (g_bat.position.x > 1) {
-                g_bat.position.x -= 5;
+                g_bat.position.x -= 4;
             }
             if (g_bat.position.x < 1) {
                 g_bat.position.x = 1;
@@ -215,7 +218,7 @@ static void calBat(int maxY, int maxX, char key)
             break;
         case 'd':
             if (g_bat.position.x < maxX - 1) {
-                g_bat.position.x += 5;
+                g_bat.position.x += 4;
             }
             if (g_bat.position.x > maxX - 1) {
                 g_bat.position.x += maxX - 1;
@@ -226,17 +229,11 @@ static void calBat(int maxY, int maxX, char key)
     }
 }
 
-static void calMap(int maxY, int maxX, char key)
-{
-    calBall(maxY, maxX);
-    calBat(maxY, maxX, key);
-}
-
 static void initBat(int maxY, int maxX)
 {
     g_bat.position.x = 0;
     g_bat.position.y = maxY - 1;
-    g_bat.len = 10;
+    g_bat.len = 30;
 }
 
 static void initBall(int maxY, int maxX)
@@ -254,7 +251,7 @@ static void initMap(int maxY, int maxX)
     initBat(maxY, maxX);
     initBall(maxY, maxX);
 
-    g_round = 0;
+    g_level = 0;
     g_score = 0;
 }
 
