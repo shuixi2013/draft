@@ -3,7 +3,7 @@
 CC			= gcc
 
 CFLAGS		+= -Wall
-LDFLAGS		+= -lm -lcurses
+LDFLAGS		+= -lm -lcurses -lpthread
 INCLUDE		+= -I$(ROOT_DIR)
 
 SUBDIRS		= $(shell ls -l | grep ^d | awk '{if($$9 != "out") print $$9}')

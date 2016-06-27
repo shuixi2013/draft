@@ -14,6 +14,7 @@
 
 #include "common.h"
 #include "gol/gol.h"
+#include "marbles1p/marbles1p.h"
 
 
 /*
@@ -38,6 +39,7 @@ static void init(void)
     noecho();
 
     initGOL();
+    initMarbles();
 }
 
 static void welcome(void)
