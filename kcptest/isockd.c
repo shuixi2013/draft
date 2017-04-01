@@ -25,6 +25,8 @@ static pthread_t g_server_pid = -1;
 static int g_server_sock = -1;
 static int g_client_sock = -1;
 static char g_dest_ip[IP_SIZE] = {0};
+static char remote_ready = 0;
+static struct sockaddr_in remote_addr = {0};
 
 static int client_udp_init(void);
 static void client_udp_destroy(void);
@@ -33,6 +35,20 @@ static void server_udp_destroy(void);
 static void server_run(void);
 static void *server_thread_func(void *arg);
 static int udp_output(const char *buf, int len, ikcpcb *kcp, void *user);
+
+int udp_recv(char *buf, int len)
+{
+	int sock_flag = 0;
+	int recv_len = 0;
+	//sock_flag |= MSG_DONTWAIT;
+	recv_len = recv(g_server_sock, buf, len, sock_flag);
+
+	if (recv_len <= 0) {
+		LOG_ERROR("Create server socket failed: %s, %d\n", strerror(errno), g_server_sock);
+	}
+
+	return recv_len;
+}
 
 static void server_run(void)
 {
@@ -46,34 +62,29 @@ static void server_run(void)
 
 	while (1)
 	{
-		LOG_DEBUG("check\n");
-		sleep(1);
-		LOG_DEBUG("check\n");
+		isleep(20);
 		current = iclock();
 		if (current >= check_time)
 		{
 			ikcp_update(g_kcp, current);
 			check_time = ikcp_check(g_kcp, current);
 		}
-		LOG_DEBUG("check\n");
 
 		while (1)
 		{
 			recv_len = recv(g_server_sock, recv_buf, BUF_SIZE, sock_flag);
-			LOG_DEBUG("recv: %s\n", recv_buf);
 			if (recv_len < 0)
 			{
-				LOG_DEBUG("break\n");
 				break;
 			}
 			ikcp_input(g_kcp, recv_buf, recv_len);
+			LOG_ERROR("recv: %s\n", recv_buf);
 		}
 	}
 }
 
 static void *server_thread_func(void *arg)
 {
-	LOG_ERROR("thread\n");
 	pthread_detach(pthread_self());
 	server_run();
 
@@ -115,6 +126,7 @@ static int server_udp_init(void)
 	}
 
 	LOG_ERROR("server ok\n");
+
 	return 0;
 
 failed:
@@ -131,7 +143,6 @@ failed:
 static int client_udp_init(void)
 {
 	struct sockaddr_in local_addr;
-	struct sockaddr_in remote_addr;
 	int ret = -1;
 
 	g_client_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -156,8 +167,8 @@ static int client_udp_init(void)
 	remote_addr.sin_family      = AF_INET;
 	remote_addr.sin_addr.s_addr = inet_addr(g_dest_ip);
 	remote_addr.sin_port        = htons(KCP_UDP_SRV_PORT);
-	while ((ret = connect(g_client_sock, (struct sockaddr*)&local_addr,
-					(socklen_t)sizeof(local_addr))) == -1)
+	while ((ret = connect(g_client_sock, (struct sockaddr*)&remote_addr,
+					(socklen_t)sizeof(remote_addr))) == -1)
 	{
 		sleep(5);
 		LOG_ERROR("Reconnect to server ... (%s)\n", strerror(errno));
@@ -245,6 +256,8 @@ void isockd_init(char *dest_ip)
 	g_kcp = ikcp_create(CONV, (void *)0);
 
 	ikcp_setoutput(g_kcp, udp_output);
+
+	return;
 
 failed:
 	isockd_destroy();

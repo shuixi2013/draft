@@ -61,6 +61,7 @@ static void server_run(void)
 			{
 				break;
 			}
+			LOG_DEBUG("recv: %s\n", recv_buf);
 			ikcp_input(g_kcp, recv_buf, recv_len);
 		}
 	}
@@ -125,12 +126,9 @@ failed:
  *****************************************************************************/
 static int client_udp_init(void)
 {
-	struct sockaddr_in addr;
-
-	bzero(&addr, sizeof(addr));
-	addr.sin_family      = AF_INET;
-	addr.sin_addr.s_addr = inet_addr(g_dest_ip);
-	addr.sin_port        = htons(KCP_UDP_SRV_PORT);
+	struct sockaddr_in local_addr;
+	struct sockaddr_in remote_addr;
+	int ret = -1;
 
 	g_client_sock = socket(AF_INET, SOCK_DGRAM, 0);
 	if (-1 == g_client_sock)
@@ -139,20 +137,35 @@ static int client_udp_init(void)
 		goto failed;
 	}
 
-	if (-1 == connect(g_client_sock, (struct sockaddr*)&addr,
-				(socklen_t)sizeof(addr)))
+	bzero(&local_addr, sizeof(local_addr));
+	local_addr.sin_family      = AF_INET;
+	local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	local_addr.sin_port        = 0;
+	if (bind(g_client_sock, (struct sockaddr*)&local_addr,
+				(socklen_t)sizeof(local_addr)) == -1)
 	{
-		LOG_ERROR("Connect to server failed\n");
+		LOG_ERROR("Bind socket failed: %s\n", strerror(errno));
 		goto failed;
 	}
 
-	LOG_ERROR("client ok\n");
-	return 0;
+	bzero(&remote_addr, sizeof(remote_addr));
+	remote_addr.sin_family      = AF_INET;
+	remote_addr.sin_addr.s_addr = inet_addr(g_dest_ip);
+	remote_addr.sin_port        = htons(KCP_UDP_SRV_PORT);
+	while ((ret = connect(g_client_sock, (struct sockaddr*)&local_addr,
+					(socklen_t)sizeof(local_addr))) == -1)
+	{
+		sleep(5);
+		LOG_ERROR("Reconnect to server ... (%s)\n", strerror(errno));
+	}
+
+	LOG_ERROR("client ok, connect: %d\n", ret);
+	return ret;
 
 failed:
 	client_udp_destroy();
 
-	return -1;
+	return ret;
 }
 
 /***************************************************************
@@ -220,6 +233,8 @@ void isock_init(char *dest_ip)
 	g_kcp = ikcp_create(CONV, (void *)0);
 
 	ikcp_setoutput(g_kcp, udp_output);
+
+	return;
 
 failed:
 	isock_destroy();

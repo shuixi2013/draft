@@ -23,6 +23,7 @@ void isockd_init(char *dest_ip);
 void isockd_destroy(void);
 int isockd_recv(char *buffer, int len);
 int isockd_send(const char *buffer, int len);
+int udp_recv(char *buf, int len);
 
 
 #endif /* end of include guard: ISOCKD_H */
