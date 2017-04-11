@@ -9,7 +9,7 @@
 #include <pthread.h>
 
 #include "common.h"
-#include "isock.h"
+#include "test.h"
 
 /*
  * arg:

@@ -19,11 +19,13 @@
 #include "common.h"
 
 
-void isock_init(const char *dest_ip);
+int isock_init(const char *dest_ip);
 void isock_destroy(void);
 int isock_recv(char *buffer, int len);
 int isock_send(const char *buffer, int len);
 int udp_recv(char *buf, int len);
+ikcpcb *isock_get_kcp(void);
+unsigned int isock_get_tx(void);
 
 
 #endif /* end of include guard: ISOCK_H */

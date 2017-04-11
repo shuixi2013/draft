@@ -19,6 +19,7 @@
 #include "ikcp.h"
 #include "isock.h"
 
+#define CHECK_ENABLE	(0)
 
 static ikcpcb *g_kcp = NULL;
 static pthread_t g_server_pid = -1;
@@ -27,6 +28,8 @@ static int g_server_sock = -1;
 static int g_client_sock = -1;
 static char g_dest_ip[IP_SIZE] = {0};
 static char remote_ready = 0;
+
+static unsigned int g_tx_cnt = 0; /* for debug */
 
 static int client_udp_init(void);
 static void client_udp_destroy(void);
@@ -65,11 +68,15 @@ static void server_run(void)
 	{
 		isleep(1);
 		current = iclock();
+#if CHECK_ENABLE
 		if (current >= check_time)
 		{
 			ikcp_update(g_kcp, current);
 			check_time = ikcp_check(g_kcp, current);
 		}
+#else
+		ikcp_update(g_kcp, current);
+#endif
 
 		while (1)
 		{
@@ -127,12 +134,12 @@ static int server_udp_init(void)
 
 	LOG_ERROR("server ok\n");
 
-	return 0;
+	return OK;
 
 failed:
 	server_udp_destroy();
 
-	return -1;
+	return ERR;
 }
 
 static void *client_udp_connect(void *arg)
@@ -198,13 +205,13 @@ static int client_udp_init(void)
 		goto failed;
 	}
 
-	LOG_ERROR("client ok, connect: %d\n", ret);
-	return ret;
+	LOG_DEBUG("client ok, connect: %d\n", ret);
+	return OK;
 
 failed:
 	client_udp_destroy();
 
-	return ret;
+	return ERR;
 }
 
 /***************************************************************
@@ -217,13 +224,19 @@ static int udp_output(const char *buf, int len, ikcpcb *kcp, void *user)
 {
 	int ret = send(g_client_sock, buf, len, 0);
 
+		LOG_DEBUG("Send packet %d, %d\n", ret, len);
 	if (-1 == ret)
 	{
 		LOG_DEBUG("Send packet failed: %s\n", strerror(errno));
 	}
 	else
 	{
-		remote_ready = 1;
+		if (!remote_ready)
+		{
+			remote_ready = 1;
+		}
+
+		g_tx_cnt++;
 	}
 
 	return ret;
@@ -259,7 +272,7 @@ static void client_udp_destroy(void)
 	}
 }
 
-void isock_init(const char *dest_ip)
+int isock_init(const char *dest_ip)
 {
 	if (dest_ip == NULL)
 	{
@@ -290,10 +303,12 @@ void isock_init(const char *dest_ip)
 
 	ikcp_setoutput(g_kcp, udp_output);
 
-	return;
+	return OK;
 
 failed:
 	isock_destroy();
+
+	return ERR;
 }
 
 void isock_destroy(void)
@@ -314,10 +329,17 @@ int isock_recv(char *buffer, int len)
 
 int isock_send(const char *buffer, int len)
 {
-	return ikcp_send(g_kcp, buffer, len);
+	int ret = ikcp_send(g_kcp, buffer, len);
+	LOG_DEBUG("Send packet len %d, ret %d\n", len, ret);
+	return ret;
 }
 
 ikcpcb *isock_get_kcp(void)
 {
 	return g_kcp;
+}
+
+unsigned int isock_get_tx(void)
+{
+	return g_tx_cnt;
 }

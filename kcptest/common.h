@@ -24,11 +24,15 @@
 
 #include "ikcp.h"
 
-#define CONV					(0x11223344)
-#define KCP_UDP_SRV_PORT		(10527)
+#define CONV				(0x11223344)
+#define KCP_UDP_SRV_PORT	(10527)
 
-#define BUF_SIZE				(1024)
-#define IP_SIZE					(16)
+#define BUF_SIZE			(1024)
+#define IP_SIZE				(16)
+
+#define ERR					(-1)
+#define OK					(0)
+
 
 #define LOG_DEBUG(...) do { \
     printf("%s: %d (%s) ", __FILE__, __LINE__, __FUNCTION__); \
@@ -40,8 +44,6 @@
     printf(__VA_ARGS__); \
 } while (0)
 
-//#define LOG_DEBUG printf
-//#define LOG_ERROR printf
 
 /* get system time */
 static inline void itimeofday(long *sec, long *usec)
