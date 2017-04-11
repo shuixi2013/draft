@@ -1,7 +1,7 @@
 CFLAGS += -Wall -g -pthread
 
 TARGET = isock
-OBJS += ikcp.o isock.o isockd.o main.o
+OBJS += ikcp.o isock.o main.o
 
 all: $(TARGET)
 
@@ -14,4 +14,4 @@ $(TARGET):$(OBJS)
 install: $(TARGET)
 
 clean:
-	-rm -f $(OBJS) $(TARGET)
+	-rm -f $(OBJS)

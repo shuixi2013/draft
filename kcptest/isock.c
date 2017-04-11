@@ -22,9 +22,11 @@
 
 static ikcpcb *g_kcp = NULL;
 static pthread_t g_server_pid = -1;
+static pthread_t g_connect_pid = -1;
 static int g_server_sock = -1;
 static int g_client_sock = -1;
 static char g_dest_ip[IP_SIZE] = {0};
+static char remote_ready = 0;
 
 static int client_udp_init(void);
 static void client_udp_destroy(void);
@@ -32,7 +34,22 @@ static int server_udp_init(void);
 static void server_udp_destroy(void);
 static void server_run(void);
 static void *server_thread_func(void *arg);
+static void *client_udp_connect(void *arg);
 static int udp_output(const char *buf, int len, ikcpcb *kcp, void *user);
+
+int udp_recv(char *buf, int len)
+{
+	int sock_flag = 0;
+	int recv_len = 0;
+	//sock_flag |= MSG_DONTWAIT;
+	recv_len = recv(g_server_sock, buf, len, sock_flag);
+
+	if (recv_len <= 0) {
+		LOG_ERROR("Create server socket failed: %s, %d\n", strerror(errno), g_server_sock);
+	}
+
+	return recv_len;
+}
 
 static void server_run(void)
 {
@@ -46,7 +63,7 @@ static void server_run(void)
 
 	while (1)
 	{
-		isleep(20);
+		isleep(1);
 		current = iclock();
 		if (current >= check_time)
 		{
@@ -61,7 +78,6 @@ static void server_run(void)
 			{
 				break;
 			}
-			LOG_DEBUG("recv: %s\n", recv_buf);
 			ikcp_input(g_kcp, recv_buf, recv_len);
 		}
 	}
@@ -119,6 +135,34 @@ failed:
 	return -1;
 }
 
+static void *client_udp_connect(void *arg)
+{
+	struct sockaddr_in remote_addr;
+	int ret = -1;
+
+	bzero(&remote_addr, sizeof(remote_addr));
+	remote_addr.sin_family      = AF_INET;
+	remote_addr.sin_addr.s_addr = inet_addr(g_dest_ip);
+	remote_addr.sin_port        = htons(KCP_UDP_SRV_PORT);
+	while (1)
+	{
+		ret = connect(g_client_sock, (struct sockaddr*)&remote_addr,
+				(socklen_t)sizeof(remote_addr));
+
+		LOG_ERROR("Connect to server ... %d(%s), ready: %d\n",
+				ret, strerror(errno), remote_ready);
+
+		if (ret == 0 && remote_ready)
+		{
+			break;
+		}
+
+		sleep(5);
+	}
+
+	return NULL;
+}
+
 /******************************************************************************
  * FUNCTION    : client_udp_init
  * DESCRIPTION : handle local -> remote data
@@ -127,7 +171,6 @@ failed:
 static int client_udp_init(void)
 {
 	struct sockaddr_in local_addr;
-	struct sockaddr_in remote_addr;
 	int ret = -1;
 
 	g_client_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -148,15 +191,11 @@ static int client_udp_init(void)
 		goto failed;
 	}
 
-	bzero(&remote_addr, sizeof(remote_addr));
-	remote_addr.sin_family      = AF_INET;
-	remote_addr.sin_addr.s_addr = inet_addr(g_dest_ip);
-	remote_addr.sin_port        = htons(KCP_UDP_SRV_PORT);
-	while ((ret = connect(g_client_sock, (struct sockaddr*)&local_addr,
-					(socklen_t)sizeof(local_addr))) == -1)
+	/* create a thread to connect remote */
+	if (0 != pthread_create(&g_connect_pid, NULL, client_udp_connect, NULL))
 	{
-		sleep(5);
-		LOG_ERROR("Reconnect to server ... (%s)\n", strerror(errno));
+		LOG_ERROR("Create server thread failed\n");
+		goto failed;
 	}
 
 	LOG_ERROR("client ok, connect: %d\n", ret);
@@ -182,6 +221,10 @@ static int udp_output(const char *buf, int len, ikcpcb *kcp, void *user)
 	{
 		LOG_DEBUG("Send packet failed: %s\n", strerror(errno));
 	}
+	else
+	{
+		remote_ready = 1;
+	}
 
 	return ret;
 }
@@ -199,7 +242,6 @@ static void server_udp_destroy(void)
 		pthread_cancel(g_server_pid);
 		g_server_pid = -1;
 	}
-
 }
 
 static void client_udp_destroy(void)
@@ -209,9 +251,15 @@ static void client_udp_destroy(void)
 		close(g_client_sock);
 		g_client_sock = -1;
 	}
+
+	if (-1 != g_connect_pid)
+	{
+		pthread_cancel(g_connect_pid);
+		g_connect_pid = -1;
+	}
 }
 
-void isock_init(char *dest_ip)
+void isock_init(const char *dest_ip)
 {
 	if (dest_ip == NULL)
 	{
@@ -220,11 +268,19 @@ void isock_init(char *dest_ip)
 	}
 
 	strncpy(g_dest_ip, dest_ip, IP_SIZE);
+	LOG_ERROR("ip: %s\n", g_dest_ip);
 
 	server_udp_init();
+
+	if (g_server_sock == -1)
+	{
+		LOG_ERROR("Init socket failed.\n");
+		goto failed;
+	}
+
 	client_udp_init();
 
-	if (g_server_sock == -1 || g_client_sock == -1)
+	if (g_client_sock == -1)
 	{
 		LOG_ERROR("Init socket failed.\n");
 		goto failed;
@@ -258,7 +314,10 @@ int isock_recv(char *buffer, int len)
 
 int isock_send(const char *buffer, int len)
 {
-	LOG_ERROR("send: %s\n", buffer);
-	//return send(g_client_sock, buffer, len, 0);
 	return ikcp_send(g_kcp, buffer, len);
+}
+
+ikcpcb *isock_get_kcp(void)
+{
+	return g_kcp;
 }
