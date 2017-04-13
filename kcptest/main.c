@@ -1,38 +1,66 @@
 /********************************************************************
  * Copyright (c) 2017, TP-LINK TECHNOLOGIES CO., LTD.
  *
- * Brief        : Test KCP
+ * Brief        : Test the KCP and TCP
  * Author       : Li Zheng <lizheng_w5625@tp-link.com.cn>
  * Created Date : 2017-03-30
  ********************************************************************/
 
-#include <pthread.h>
-
 #include "common.h"
-#include "test.h"
+#include "kcp_test.h"
 
 /*
- * arg:
- * dest ip
- * s/c
+ * Arguments:
+ * - ip string (remote ip)
+ * - s/c (server/client)
+ * - k/t (kcp/tcp)
  */
 int main(int argc, const char *argv[])
 {
-	if (argc <= 1)
+	char ip[IP_SIZE] = {0};
+	char role = 0;
+	char proto = 0;
+
+	if (argc < 2)
 	{
 		LOG_ERROR("Need remote IP\n");
 		return -1;
 	}
 
-	if (argc <= 2)
+	strncpy(ip, argv[1], IP_SIZE);
+
+	if (argc < 3)
 	{
 		LOG_DEBUG("Manual test\n");
-		manual_test(argv[1]);
+		kcp_manual_test(ip);
 		return 0;
 	}
 
-	LOG_DEBUG("Auto test\n");
-	auto_test(argv[1], argv[2][0]);
+	if (argc < 4)
+	{
+		LOG_ERROR("Arguments invalid\n");
+		return -1;
+	}
+
+
+	role = argv[2][0];
+	proto = argv[3][0];
+
+	if (proto == 'k')
+	{
+		LOG_DEBUG("Auto KCP test\n");
+		kcp_auto_test(ip, role);
+	}
+	else if (proto == 't')
+	{
+		LOG_DEBUG("Auto TCP test\n");
+		//tcp_auto_test(ip, role);
+	}
+	else
+	{
+		LOG_ERROR("Invalid proto\n");
+		return -1;
+	}
 
 	return 0;
 }

@@ -396,6 +396,9 @@ void ikcp_allocator(void* (*new_malloc)(size_t), void (*new_free)(void*));
 // read conv
 IUINT32 ikcp_getconv(const void *ptr);
 
+void ikcp_set_logmask(ikcpcb *kcp, int mask);
+void ikcp_set_writelog(ikcpcb *kcp, void (*writelog)
+		(const char *log, struct IKCPCB *kcp, void *user));
 
 #ifdef __cplusplus
 }

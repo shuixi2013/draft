@@ -19,7 +19,8 @@
 #include "ikcp.h"
 #include "isock.h"
 
-#define CHECK_ENABLE	(0)
+#define CHECK_ENABLE	(1)
+#define SENDTO_ENABLE	(1)
 
 static ikcpcb *g_kcp = NULL;
 static pthread_t g_server_pid = -1;
@@ -27,7 +28,8 @@ static pthread_t g_connect_pid = -1;
 static int g_server_sock = -1;
 static int g_client_sock = -1;
 static char g_dest_ip[IP_SIZE] = {0};
-static char remote_ready = 0;
+static char g_remote_ready = 0;
+static struct sockaddr_in g_remote_addr;
 
 static unsigned int g_tx_cnt = 0; /* for debug */
 
@@ -132,8 +134,6 @@ static int server_udp_init(void)
 		goto failed;
 	}
 
-	LOG_ERROR("server ok\n");
-
 	return OK;
 
 failed:
@@ -144,28 +144,32 @@ failed:
 
 static void *client_udp_connect(void *arg)
 {
-	struct sockaddr_in remote_addr;
+	bzero(&g_remote_addr, sizeof(g_remote_addr));
+	g_remote_addr.sin_family      = AF_INET;
+	g_remote_addr.sin_addr.s_addr = inet_addr(g_dest_ip);
+	g_remote_addr.sin_port        = htons(KCP_UDP_SRV_PORT);
+
+#if SENDTO_ENABLE
+	/* do nothing */
+#else
 	int ret = -1;
 
-	bzero(&remote_addr, sizeof(remote_addr));
-	remote_addr.sin_family      = AF_INET;
-	remote_addr.sin_addr.s_addr = inet_addr(g_dest_ip);
-	remote_addr.sin_port        = htons(KCP_UDP_SRV_PORT);
 	while (1)
 	{
-		ret = connect(g_client_sock, (struct sockaddr*)&remote_addr,
-				(socklen_t)sizeof(remote_addr));
+		ret = connect(g_client_sock, (struct sockaddr*)&g_remote_addr,
+				(socklen_t)sizeof(g_remote_addr));
 
 		LOG_ERROR("Connect to server ... %d(%s), ready: %d\n",
-				ret, strerror(errno), remote_ready);
+				ret, strerror(errno), g_remote_ready);
 
-		if (ret == 0 && remote_ready)
+		if (ret == 0 && g_remote_ready)
 		{
 			break;
 		}
 
 		sleep(5);
 	}
+#endif
 
 	return NULL;
 }
@@ -178,7 +182,6 @@ static void *client_udp_connect(void *arg)
 static int client_udp_init(void)
 {
 	struct sockaddr_in local_addr;
-	int ret = -1;
 
 	g_client_sock = socket(AF_INET, SOCK_DGRAM, 0);
 	if (-1 == g_client_sock)
@@ -205,7 +208,6 @@ static int client_udp_init(void)
 		goto failed;
 	}
 
-	LOG_DEBUG("client ok, connect: %d\n", ret);
 	return OK;
 
 failed:
@@ -222,18 +224,24 @@ failed:
  ***************************************************************/
 static int udp_output(const char *buf, int len, ikcpcb *kcp, void *user)
 {
-	int ret = send(g_client_sock, buf, len, 0);
+	int ret = 0;
 
-		LOG_DEBUG("Send packet %d, %d\n", ret, len);
+#if SENDTO_ENABLE
+	ret = sendto(g_client_sock, buf, len, 0,
+			&g_remote_addr, sizeof(g_remote_addr));
+#else
+	ret = send(g_client_sock, buf, len, 0);
+#endif
+
 	if (-1 == ret)
 	{
 		LOG_DEBUG("Send packet failed: %s\n", strerror(errno));
 	}
 	else
 	{
-		if (!remote_ready)
+		if (!g_remote_ready)
 		{
-			remote_ready = 1;
+			g_remote_ready = 1;
 		}
 
 		g_tx_cnt++;
@@ -329,9 +337,7 @@ int isock_recv(char *buffer, int len)
 
 int isock_send(const char *buffer, int len)
 {
-	int ret = ikcp_send(g_kcp, buffer, len);
-	LOG_DEBUG("Send packet len %d, ret %d\n", len, ret);
-	return ret;
+	return ikcp_send(g_kcp, buffer, len);
 }
 
 ikcpcb *isock_get_kcp(void)

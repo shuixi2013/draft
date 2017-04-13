@@ -1271,4 +1271,13 @@ IUINT32 ikcp_getconv(const void *ptr)
 	return conv;
 }
 
+void ikcp_set_logmask(ikcpcb *kcp, int mask)
+{
+	kcp->logmask = mask;
+}
 
+void ikcp_set_writelog(ikcpcb *kcp, void (*writelog)
+		(const char *log, struct IKCPCB *kcp, void *user))
+{
+	kcp->writelog = writelog;
+}

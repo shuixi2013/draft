@@ -1,7 +1,7 @@
 CFLAGS += -Wall -g -pthread
 
 TARGET = isock
-OBJS += ikcp.o isock.o main.o test.o
+OBJS += ikcp.o isock.o main.o kcp_test.o
 
 all: $(TARGET)
 
