@@ -20,7 +20,7 @@
 #include "isock.h"
 
 #define CHECK_ENABLE	(1)
-#define SENDTO_ENABLE	(1)
+#define CONNECT_ENABLE	(1)
 
 static ikcpcb *g_kcp = NULL;
 static pthread_t g_server_pid = -1;
@@ -149,9 +149,7 @@ static void *client_udp_connect(void *arg)
 	g_remote_addr.sin_addr.s_addr = inet_addr(g_dest_ip);
 	g_remote_addr.sin_port        = htons(KCP_UDP_SRV_PORT);
 
-#if SENDTO_ENABLE
-	/* do nothing */
-#else
+#if CONNECT_ENABLE
 	int ret = -1;
 
 	while (1)
@@ -169,6 +167,8 @@ static void *client_udp_connect(void *arg)
 
 		sleep(5);
 	}
+#else
+	/* do nothing */
 #endif
 
 	return NULL;
@@ -226,11 +226,11 @@ static int udp_output(const char *buf, int len, ikcpcb *kcp, void *user)
 {
 	int ret = 0;
 
-#if SENDTO_ENABLE
+#if CONNECT_ENABLE
+	ret = send(g_client_sock, buf, len, 0);
+#else
 	ret = sendto(g_client_sock, buf, len, 0,
 			&g_remote_addr, sizeof(g_remote_addr));
-#else
-	ret = send(g_client_sock, buf, len, 0);
 #endif
 
 	if (-1 == ret)

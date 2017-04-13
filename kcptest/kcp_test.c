@@ -66,17 +66,13 @@ static int auto_test_srv(const char *ip)
 
 	IUINT32 ts1 = iclock();
 
-	while (1) {
+	while(1)
+	{
 		isleep(1);
 
-		// 接收到任何包都返回回去
-		while (1) {
-			hr = isock_recv(buffer, 10);
-			// 没有收到包就退出
-			if (hr < 0) break;
-			// 如果收到包就回射
-			isock_send(buffer, hr);
-		}
+		hr = isock_recv(buffer, 10);
+		if (hr < 0) continue;
+		isock_send(buffer, hr);
 	}
 
 	ts1 = iclock() - ts1;

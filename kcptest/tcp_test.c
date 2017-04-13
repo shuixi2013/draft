@@ -1,96 +1,116 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 
-#include "ikcp.h"
-#include "isock.h"
 #include "common.h"
+#include "tcp_test.h"
 
-/*
- * 0: 默认模式，类似 TCP：正常模式，无快速重传，常规流控
- * 1: 普通模式，关闭流控等
- * 2: 快速模式，所有开关都打开，且关闭流控
- */
-#define AUTO_MODE (0)
+#define SRV_PORT		(10527)
+#define CLI_PORT		(10419)
 
 static pthread_t g_server_pid = -1;
-static char input[BUF_SIZE] = {0};
+static int g_sockfd = -1;
 
-static int auto_test_srv(const char *ip, int mode)
+static void cleanup(void)
 {
-	if (isock_init(ip) == ERR)
+	if (g_sockfd > 0)
 	{
+		close(g_sockfd);
+		g_sockfd = -1;
+	}
+}
+
+static int auto_test_srv(const char *ip)
+{
+	char buffer[BUF_SIZE];
+	int hr;
+
+	g_sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (socket < 0)
+	{
+		LOG_ERROR("Create socket failed\n");
 		goto failed;
 	}
 
-	char buffer[BUF_SIZE];
-	int hr;
-	ikcpcb *kcp = isock_get_kcp();
-	IUINT32 current = 0;
+	struct sockaddr_in srvaddr;
+	bzero(&srvaddr, sizeof(srvaddr));
+	srvaddr.sin_family = AF_INET;
+	srvaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+	srvaddr.sin_port = htons(SRV_PORT);
 
-	// 配置窗口大小：平均延迟200ms，每20ms发送一个包，
-	// 而考虑到丢包重发，设置最大收发窗口为128
-	ikcp_wndsize(kcp, 128, 128);
+	bind(g_sockfd, (struct sockaddr *)&srvaddr, sizeof(srvaddr));
+	listen(g_sockfd, 128);
 
-	// 判断测试用例的模式
-	if (mode == 0) {
-		// 默认模式
-		ikcp_nodelay(kcp, 0, 10, 0, 0);
-	}
-	else if (mode == 1) {
-		// 普通模式，关闭流控等
-		ikcp_nodelay(kcp, 0, 10, 0, 1);
-	}	else {
-		// 启动快速模式
-		// 第二个参数 nodelay-启用以后若干常规加速将启动
-		// 第三个参数 interval为内部处理时钟，默认设置为 10ms
-		// 第四个参数 resend为快速重传指标，设置为2
-		// 第五个参数 为是否禁用常规流控，这里禁止
-		ikcp_nodelay(kcp, 1, 10, 2, 1);
-	}
+	while (1)
+	{
+		struct sockaddr_in cliaddr;
+		bzero(&cliaddr, sizeof(cliaddr));
+		socklen_t cliaddr_len = sizeof(cliaddr);
+		int connfd = accept(g_sockfd, (struct sockaddr *)&cliaddr, &cliaddr_len);
 
-	IUINT32 ts1 = iclock();
+		int flag = 1;
+		setsockopt(connfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(int));
 
-	while (1) {
-		isleep(1);
-		current = iclock();
+		char str[INET_ADDRSTRLEN];
+		printf("connected from %s at PORT %d\n",
+				inet_ntop(AF_INET, &cliaddr.sin_addr, str, sizeof(str)),
+				ntohs(cliaddr.sin_port));
 
-		// 接收到任何包都返回回去
-		while (1) {
-			hr = isock_recv(buffer, 10);
-			// 没有收到包就退出
-			if (hr < 0) break;
-			// 如果收到包就回射
-			isock_send(buffer, hr);
+		while(1)
+		{
+			isleep(1);
+
+			hr = recv(connfd, buffer, 10, 0);
+			if (hr < 0) continue;
+			send(connfd, buffer, hr, 0);
 		}
+
+		close(connfd);
+		printf("closed from %s at PORT %d\n",
+				inet_ntop(AF_INET, &cliaddr.sin_addr, str, sizeof(str)),
+				ntohs(cliaddr.sin_port));
 	}
 
-	ts1 = iclock() - ts1;
+	cleanup();
 
-	isock_destroy();
-
-	const char *names[3] = { "default", "normal", "fast" };
-	printf("%s mode result (%dms):\n", names[mode], (int)ts1);
-	printf("tx=%u\n", isock_get_tx());
+	//TODO
+	printf("tx=%u\n", 1);
 	printf("press enter to next ...\n");
 	char ch; scanf("%c", &ch);
 
 	return OK;
 
 failed:
-	isock_destroy();
+	cleanup();
 
 	return ERR;
 }
 
-static int auto_test_cli(const char *ip, int mode)
+static int auto_test_cli(const char *ip)
 {
-	if (isock_init(ip) == ERR)
+	g_sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+	struct sockaddr_in srvaddr;
+	bzero(&srvaddr, sizeof(srvaddr));
+	srvaddr.sin_family = AF_INET;
+	inet_pton(AF_INET, ip, &srvaddr.sin_addr);
+	srvaddr.sin_port = htons(SRV_PORT);
+
+	if (0 != connect(g_sockfd, (struct sockaddr *)&srvaddr, sizeof(srvaddr)))
 	{
+		LOG_ERROR("Connect failed\n");
 		goto failed;
 	}
+	LOG_DEBUG("Connect !!\n");
 
-	ikcpcb *kcp = isock_get_kcp();
+	int flag = 1;
+	setsockopt(g_sockfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(int));
+
 	IUINT32 current = iclock();
 	IUINT32 slap = current + 20;
 	IUINT32 index = 0;
@@ -100,29 +120,6 @@ static int auto_test_cli(const char *ip, int mode)
 	int maxrtt = 0;
 	char buffer[BUF_SIZE];
 	int hr;
-
-	// 配置窗口大小：平均延迟200ms，每20ms发送一个包，
-	// 而考虑到丢包重发，设置最大收发窗口为128
-	ikcp_wndsize(kcp, 128, 128);
-
-	// 判断测试用例的模式
-	if (mode == 0) {
-		// 默认模式
-		ikcp_nodelay(kcp, 0, 10, 0, 0);
-	}
-	else if (mode == 1) {
-		// 普通模式，关闭流控等
-		ikcp_nodelay(kcp, 0, 10, 0, 1);
-	}	else {
-		// 启动快速模式
-		// 第二个参数 nodelay-启用以后若干常规加速将启动
-		// 第三个参数 interval为内部处理时钟，默认设置为 10ms
-		// 第四个参数 resend为快速重传指标，设置为2
-		// 第五个参数 为是否禁用常规流控，这里禁止
-		ikcp_nodelay(kcp, 1, 10, 2, 1);
-		kcp->rx_minrto = 10;
-		kcp->fastresend = 1;
-	}
 
 	IUINT32 ts1 = iclock();
 
@@ -136,11 +133,11 @@ static int auto_test_cli(const char *ip, int mode)
 			((IUINT32*)buffer)[1] = current;
 
 			// 发送上层协议包
-			isock_send(buffer, 8);
+			send(g_sockfd, buffer, 8, 0);
 		}
 
 		while (1) {
-			hr = isock_recv(buffer, 10);
+			hr = recv(g_sockfd, buffer, 10, MSG_DONTWAIT);
 			// 没有收到包就退出
 			if (hr < 0) break;
 			IUINT32 sn = *(IUINT32*)(buffer + 0);
@@ -149,7 +146,7 @@ static int auto_test_cli(const char *ip, int mode)
 			
 			if (sn != next) {
 				// 如果收到的包不连续
-				//printf("ERROR sn %d<->%d\n", (int)count, (int)next);
+				printf("ERROR sn %d<->%d\n", (int)count, (int)next);
 				goto failed;
 			}
 
@@ -165,42 +162,42 @@ static int auto_test_cli(const char *ip, int mode)
 
 	ts1 = iclock() - ts1;
 
-	isock_destroy();
+	cleanup();
 
-	const char *names[3] = { "default", "normal", "fast" };
-	printf("%s mode result (%dms):\n", names[mode], (int)ts1);
-	printf("avgrtt=%d maxrtt=%d tx=%u\n", (int)(sumrtt / count), (int)maxrtt, isock_get_tx());
+	printf("result (%dms):\n", (int)ts1);
+	//TODO
+	printf("avgrtt=%d maxrtt=%d tx=%u\n", (int)(sumrtt / count), (int)maxrtt, 1);
 	printf("press enter to next ...\n");
 	char ch; scanf("%c", &ch);
 
 	return OK;
 
 failed:
-	isock_destroy();
+	cleanup();
 
 	return ERR;
 }
 
 
-void kcp_auto_test(const char *ip, char role)
+void tcp_auto_test(const char *ip, char role)
 {
 	if (role == 'c')
 	{
-		auto_test_cli(ip, AUTO_MODE);
+		auto_test_cli(ip);
 	}
 	else if (role == 's')
 	{
-		auto_test_srv(ip, AUTO_MODE);
+		auto_test_srv(ip);
 	}
 	else
 	{
 		LOG_ERROR("Invalid role\n");
-		return -1;
 	}
 }
 
 static void *server_thread_func(void *arg)
 {
+/*
 	char recv[BUF_SIZE];
 	int recv_len;
 
@@ -217,12 +214,15 @@ static void *server_thread_func(void *arg)
 		}
 	}
 
+*/
 	return NULL;
 }
 
-
-void kcp_manual_test(const char *ip)
+void tcp_manual_test(const char *ip)
 {
+	/*
+	char input[BUF_SIZE] = {0};
+
 	isock_init(ip);
 	if (0 != pthread_create(&g_server_pid, NULL, server_thread_func, NULL))
 	{
@@ -231,6 +231,7 @@ void kcp_manual_test(const char *ip)
 
 	while (1)
 	{
+		memset(input, 0, BUF_SIZE);
 		scanf("%s", input);
 		isock_send(input, strlen(input));
 	}
@@ -238,6 +239,7 @@ void kcp_manual_test(const char *ip)
 	isock_destroy();
 	pthread_join(g_server_pid, NULL);
 	LOG_DEBUG("server end\n");
+	*/
 }
 
 /*

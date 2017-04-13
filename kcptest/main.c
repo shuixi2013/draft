@@ -54,7 +54,7 @@ int main(int argc, const char *argv[])
 	else if (proto == 't')
 	{
 		LOG_DEBUG("Auto TCP test\n");
-		//tcp_auto_test(ip, role);
+		tcp_auto_test(ip, role);
 	}
 	else
 	{

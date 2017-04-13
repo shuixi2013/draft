@@ -1,8 +1,8 @@
 
-#ifndef TEST_H
-#define TEST_H
+#ifndef TCP_TEST_H
+#define TCP_TEST_H
 
-void manual_test(const char *ip);
-void auto_test(const char *ip, char role);
+void tcp_manual_test(const char *ip);
+void tcp_auto_test(const char *ip, char role);
 
-#endif /* end of include guard: TEST_H */
+#endif /* end of include guard: TCP_TEST_H */
