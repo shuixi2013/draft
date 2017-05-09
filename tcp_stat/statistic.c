@@ -1,4 +1,3 @@
-
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -41,16 +40,14 @@ typedef struct _STREAM
 /************************************************
  * function declares
  */
-static int output_init(void);
-static void output_exit(void);
 
 
 /************************************************
  * global variables
  */
+STREAM g_stream_head = {0};
 static FILE *g_output = NULL;
 static STREAM *g_stream_list = NULL;
-
 
 void statistic_cap_tcp(register const u_char *tcphdr, register const u_char *iphdr)
 {
@@ -93,33 +90,11 @@ void statistic_cap_tcp(register const u_char *tcphdr, register const u_char *iph
 	}
 }
 
-static int output_init(void)
-{
-	if (!g_output) {
-		g_output = fopen(OUTPUT_FILE, "a");
-		if (!g_output) {
-			fprintf(stderr, "unable to open file %s\n", OUTPUT_FILE);
-			return ERR;
-		}
-	}
-
-	return OK;
-}
-
-static void output_exit(void)
-{
-	if (g_output) {
-		(void)fflush(g_output);
-		fclose(g_output);
-		g_output = NULL;
-	}
-}
-
 static STREAM *stream_create(void)
 {
 	STREAM *stream = (STREAM *)malloc(sizeof(STREAM));
 	if (!stream) {
-		fprintf(stderr, "create stream node failed\n", OUTPUT_FILE);
+		fprintf(stderr, "create stream node failed\n");
 		return NULL;
 	}
 	memset(stream, 0, sizeof(STREAM));
@@ -127,13 +102,79 @@ static STREAM *stream_create(void)
 	return stream;
 }
 
+static void stream_destroy(STREAM *node)
+{
+	if (node->fp) {
+		fflush(fp);
+		fclose(fp);
+	}
+
+	free(node);
+	node = NULL;
+}
+
+static STREAM *stream_list_add(STREAM *node)
+{
+	STREAM *p = g_stream_list;
+	while (p->next) {
+		p = p->next;
+	}
+	p->next = node;
+
+	return g_stream_list;
+}
+
+static STREAM *stream_list_remove(STREAM *node)
+{
+	STREAM *pre;
+	STREAM *next;
+
+	pre = stream_list_lookup_by_pointer(node);
+	next = node->next;
+}
+
+/* do not check member */
+/* return the parent pointer */
+static STREAM *stream_list_lookup_by_pointer(STREAM *node)
+{
+	STREAM *p = g_stream_list;
+	STREAM *result = NULL;
+
+	while (p->next) {
+		if (node == p->next) {
+			result = p;
+			break;
+		}
+		p = p->next;
+	}
+
+	return result;
+}
+
+/* return the parent pointer */
+static STREAM *stream_list_lookup_by_tuple(TUPLE *tuple)
+{
+}
+
 void statistic_init(void)
 {
-	output_init();
+	if (!g_output) {
+		g_output = fopen(OUTPUT_FILE, "a");
+		if (!g_output) {
+			fprintf(stderr, "unable to open file %s\n", OUTPUT_FILE);
+			return;
+		}
+	}
+
+	g_stream_list = &g_stream_head;
 }
 
 void statistic_exit(void)
 {
-	output_exit();
+	if (g_output) {
+		(void)fflush(g_output);
+		fclose(g_output);
+		g_output = NULL;
+	}
 }
 
