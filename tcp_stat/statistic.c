@@ -3,9 +3,12 @@
  *
  * Brief        : Statistics of TCP stream, based on tcpdump.
  * Author       : zaynli
- * Created Date : 2017-05-10
+ * Created Date : 2017-05-15
  ********************************************************************/
 
+/********************************************************************
+ * headers
+ ********************************************************************/
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -25,15 +28,22 @@
 #include "tcp.h"
 #include "ip.h"
 
+
 /********************************************************************
  * defines and types
  ********************************************************************/
 #define OK						(0)
 #define ERR						(-1)
 #define FILENAME_LEN			(50)
-#define STREAM_LEN_THRESHOLD	(256 * (2<<10)) /* 256 kB */
+#define STREAM_LEN_THRESHOLD	(256 * 1024) /* 256 kB */
 #define OUTPUT_PATH				"/tmp/statistic/"
 #define OUTPUT_SYN_FILE			OUTPUT_PATH"syn_collection"
+
+#define RECORD(fp, ...) do { \
+	if (fp) { \
+		fprintf(fp, __VA_ARGS__); \
+	} \
+} while (0)
 
 typedef struct _TUPLE
 {
@@ -45,7 +55,7 @@ typedef enum _STREAM_STATE
 {
 	STREAM_START = 0,
 	STREAM_RUNNING,
-	STREAM_END,
+	STREAM_FULL,
 	STREAM_CLEANUP
 } STREAM_STATE;
 
@@ -73,6 +83,7 @@ static void stream_node_update(
 		struct in_addr saddr, struct in_addr daddr,
 		register const u_char *tcphdr, uint32_t length);
 
+
 /********************************************************************
  * global variables
  ********************************************************************/
@@ -82,7 +93,7 @@ static STREAM *g_stream_list = NULL;
 
 
 /********************************************************************
- * function defines
+ * function implements
  ********************************************************************/
 void statistic_cap_tcp(register const u_char *tcphdr, uint32_t length,
 		register const u_char *iphdr, int fragmented)
@@ -114,20 +125,20 @@ void statistic_cap_tcp(register const u_char *tcphdr, uint32_t length,
 	dport = EXTRACT_16BITS(&tp->th_dport);
 
 	seq = EXTRACT_32BITS(&tp->th_seq);
+	ack = EXTRACT_32BITS(&tp->th_ack);
 	win = EXTRACT_16BITS(&tp->th_win);
 
 	flags = tp->th_flags;
 
 	if (flags & TH_SYN) {
 		/* sip:sport>dip:dport win seq */
-		fprintf(g_output, "%s:%d", inet_ntoa(saddr), sport);
-		fprintf(g_output, ">%s:%d", inet_ntoa(daddr), dport);
-		fprintf(g_output, " %d %u\n", win, seq);
+		RECORD(g_output, "%s:%d", inet_ntoa(saddr), sport);
+		RECORD(g_output, ">%s:%d", inet_ntoa(daddr), dport);
+		RECORD(g_output, " %d %u\n", win, seq);
 	}
 
 	length -= TH_OFF(tp) * 4;
 	stream_node_update(saddr, daddr, tcphdr, length);
-		fprintf(stderr, "------------%d\n", __LINE__);
 }
 
 static void stream_node_update(
@@ -137,12 +148,17 @@ static void stream_node_update(
 	register const struct tcphdr *tp;
 	register u_char flags;
 	uint16_t sport, dport, win, urp;
+	uint32_t seq, ack, thseq, thack;
 
 	tp = (const struct tcphdr *)tcphdr;
 
 	flags = tp->th_flags;
 	sport = EXTRACT_16BITS(&tp->th_sport);
 	dport = EXTRACT_16BITS(&tp->th_dport);
+
+	seq = EXTRACT_32BITS(&tp->th_seq);
+	ack = EXTRACT_32BITS(&tp->th_ack);
+	win = EXTRACT_16BITS(&tp->th_win);
 
 	TUPLE tuple = {
 		.saddr = saddr,
@@ -156,10 +172,6 @@ static void stream_node_update(
 	if (node) {
 		/* get this node self */
 		node = node->next;
-
-		if (node->state >= STREAM_END) {
-			goto handle_state;
-		}
 
 		node->total_len += length;
 	} else {
@@ -187,7 +199,6 @@ static void stream_node_update(
 		sprintf(filename, "%s%s:%d", filename, inet_ntoa(node->tuple.saddr), node->tuple.sport);
 		sprintf(filename, "%s_%s:%d", filename, inet_ntoa(node->tuple.daddr), node->tuple.dport);
 		sprintf(filename, "%s_%lx", filename, node->timestamp);
-		fprintf(stderr, "%d------------file name :%s \n", __LINE__, filename);
 		node->fp = fopen(filename, "a");
 		if (!node->fp) {
 			fprintf(stderr, "unable to open file %s\n", filename);
@@ -197,20 +208,35 @@ static void stream_node_update(
 		stream_list_add(node);
 	}
 
+	if (node->state >= STREAM_FULL) {
+		goto handle_state;
+	}
+
 	/* store the stream node to file */
-	fprintf(node->fp, "%d %u\n", win, length);
+	RECORD(node->fp, "%d %u %u", win, length, seq);
+	if (length > 0) {
+		RECORD(node->fp, ":%u", seq + length);
+	}
+	if (flags & TH_ACK) {
+		RECORD(node->fp, " %u", ack);
+	}
+	RECORD(node->fp, "\n");
 
 handle_state:
 	/* handle the stream node state */
-	if (node->total_len >= STREAM_LEN_THRESHOLD) {
-		node->state = STREAM_END;
+	if (node->total_len >= STREAM_LEN_THRESHOLD && node->state == STREAM_RUNNING) {
+		RECORD(node->fp, "full %u\n", node->total_len);
+		fprintf(stderr, "a stream full\n");
+		node->state = STREAM_FULL;
 	}
 
 	if (flags & TH_FIN) {
+		RECORD(node->fp, "finish %u\n", node->total_len);
+		fprintf(stderr, "a stream finish\n");
 		node->state = STREAM_CLEANUP;
 	}
 
-	if (node->state == STREAM_END) {
+	if (node->state == STREAM_FULL) {
 		if (node->fp) {
 			fflush(node->fp);
 			fclose(node->fp);
