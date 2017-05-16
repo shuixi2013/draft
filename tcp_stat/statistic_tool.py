@@ -11,9 +11,9 @@ data_path = "/tmp/statistic/"
 data_window = data_path + "syn_collection"
 local_ip = "192.168.36.129"
 
-total = 0
 result = {}
 
+# track one stream
 def handle_stream(filename):
     with open(filename, 'r') as f:
         syn_set = {}
@@ -64,50 +64,70 @@ def handle_stream(filename):
         return [frame_missing_rate, data_missing_rate]
         print syn_set
 
-# track one stream
-print "============================"
-print "part 1: track stream"
-print "============================"
-for parent,dirnames,filenames in os.walk(data_path):
-    print("frame miss\tdata miss\tstream")
-    for filename in filenames:
-        # only track local->remote stream
-        #sender = filename.split('_')[0]
-        #if sender.find(local_ip) < 0:
-        #    continue
+def track_stream():
+    print "============================"
+    print "= track stream"
+    print "============================"
+    for parent,dirnames,filenames in os.walk(data_path):
+        print("frame miss\tdata miss\tstream")
+        for filename in filenames:
+            # only track local->remote stream
+            #sender = filename.split('_')[0]
+            #if sender.find(local_ip) < 0:
+            #    continue
 
-        full_filename = os.path.join(parent,filename)
-        ret = handle_stream(full_filename)
-        if not ret:
-            #print("bad file: " + full_filename)
-            continue
+            full_filename = os.path.join(parent,filename)
+            ret = handle_stream(full_filename)
+            if not ret:
+                #print("bad file: " + full_filename)
+                continue
 
-        print("%.2f\t%.2f\t%s" % (ret[0], ret[1], full_filename))
+            print("%.2f\t%.2f\t%s" % (ret[0], ret[1], full_filename))
 
 
 # window statistic
-print "============================"
-print "part 2: window statistic"
-print "============================"
-with open(data_window, 'r') as f:
-    for line in f:
-        lines_list = line.split()
+def window_statistic():
+    print "============================"
+    print "= window statistic"
+    print "============================"
 
-        line_tuple = lines_list[0]
-        line_win = lines_list[1]
+    total = 0
+    with open(data_window, 'r') as f:
+        for line in f:
+            lines_list = line.split()
+            if len(lines_list) < 3:
+                continue
 
-        # skip local window
-        sender = line_tuple.split('>')[0]
-        if sender.find(local_ip) >= 0:
-            continue
+            line_tuple = lines_list[0]
+            line_win = lines_list[1]
 
-        total += 1
-        if line_win not in result:
-            result[line_win] = 1
-        else:
-            result[line_win] += 1
+            # skip local window
+            sender = line_tuple.split('>')[0]
+            if sender.find(local_ip) >= 0:
+                continue
+
+            total += 1
+            if line_win not in result:
+                result[line_win] = 1
+            else:
+                result[line_win] += 1
+
+    print("window\tcount\tratio")
+    for k, v in result.items():
+        print("%s\t%s\t%.2f%%" % (k, v, (v*100.0/total)))
+
+# streams statistic
+def streams_statistic():
+    print "============================"
+    print "= streams statistic"
+    print "============================"
 
 
-print("window\tcount\tratio")
-for k, v in result.items():
-    print("%s\t%s\t%.2f%%" % (k, v, (v*100.0/total)))
+
+cmd = raw_input("Analyze window? (Y/n)")
+if cmd != 'n':
+    window_statistic()
+
+cmd = raw_input("Analyze steams? (y/N)")
+if cmd == 'y':
+    streams_statistic()

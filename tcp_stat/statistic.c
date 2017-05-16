@@ -1,7 +1,7 @@
 /********************************************************************
  * Copyright (c) 2017, TENCENT TECHNOLOGIES CO., LTD.
  *
- * Brief        : Statistics of TCP stream, based on tcpdump.
+ * Brief        : Statistics of Stream, based on tcpdump.
  * Author       : zaynli
  * Created Date : 2017-05-15
  ********************************************************************/
@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <netdissect-stdinc.h>
 
 #include "netdissect.h"
@@ -35,15 +36,19 @@
 #define OK						(0)
 #define ERR						(-1)
 #define FILENAME_LEN			(50)
+#define CONFIG_LEN				(200)
+#define SEC_IN_MICROSECONDS		(1000000) /* 1 s = 10^6 us */
 #define STREAM_LEN_THRESHOLD	(256 * 1024) /* 256 kB */
 #define OUTPUT_PATH				"/tmp/statistic/"
 #define OUTPUT_SYN_FILE			OUTPUT_PATH"syn_collection"
+#define CONFIG_FILE				"sos_config"
 
 #define RECORD(fp, ...) do { \
 	if (fp) { \
 		fprintf(fp, __VA_ARGS__); \
 	} \
 } while (0)
+
 
 typedef struct _TUPLE
 {
@@ -56,19 +61,33 @@ typedef enum _STREAM_STATE
 	STREAM_START = 0,
 	STREAM_RUNNING,
 	STREAM_FULL,
-	STREAM_CLEANUP
+	STREAM_FIN
 } STREAM_STATE;
 
 typedef struct _STREAM
 {
 	TUPLE tuple;
-	time_t timestamp;
+	struct timeval timestamp;
 	FILE *fp;
+	uint32_t seq_fence;
+	uint32_t missed_len; /* TCP payload only */
 	uint32_t total_len; /* TCP payload only */
+	uint32_t missed_frames;
+	uint32_t total_frames;
 	STREAM_STATE state;
 	struct _STREAM *next;
 } STREAM;
 
+typedef enum _CONFIG_TYPE
+{
+	CFG_OUTPUT_PATH,
+} CONFIG_TYPE;
+
+typedef struct _CONFIG_STR
+{
+	char *key;
+	char *val;
+} CONFIG_STR;
 
 /********************************************************************
  * function declares
@@ -82,6 +101,7 @@ static void stream_node_destroy(STREAM *node);
 static void stream_node_update(
 		struct in_addr saddr, struct in_addr daddr,
 		register const u_char *tcphdr, uint32_t length);
+static void dump_stream_info(FILE *fp, STREAM *node);
 
 
 /********************************************************************
@@ -90,6 +110,10 @@ static void stream_node_update(
 STREAM g_stream_head = {0};
 static FILE *g_output = NULL;
 static STREAM *g_stream_list = NULL;
+
+static CONFIG_STR g_config_str[] = {
+	{ "key",	"val" },
+}
 
 
 /********************************************************************
@@ -173,13 +197,7 @@ static void stream_node_update(
 		/* get this node self */
 		node = node->next;
 
-		node->total_len += length;
 	} else {
-		if (flags & TH_FIN) {
-			/* did not track it */
-			return;
-		}
-
 		char filename[NAME_MAX] = {0};
 		node = stream_node_create();
 		if (!node) {
@@ -187,23 +205,28 @@ static void stream_node_update(
 		}
 
 		memcpy(&node->tuple, &tuple, sizeof(TUPLE));
-		node->timestamp = time(NULL);
-		node->total_len = length;
+		gettimeofday(&node->timestamp, NULL);
+		node->seq_fence = seq;
+		node->missed_len = 0;
+		node->missed_frames = 0;
+		node->total_len = 0;
+		node->total_frames = 0;
 		node->state = STREAM_RUNNING;
 		node->next = NULL;
+		node->fp = NULL;
 		/*
 		 * store the tuple info to file name asume
 		 * file name: sip-sport_dip-dport_timestamp
 		 */
-		sprintf(filename, "%s", OUTPUT_PATH);
-		sprintf(filename, "%s%s:%d", filename, inet_ntoa(node->tuple.saddr), node->tuple.sport);
-		sprintf(filename, "%s_%s:%d", filename, inet_ntoa(node->tuple.daddr), node->tuple.dport);
-		sprintf(filename, "%s_%lx", filename, node->timestamp);
-		node->fp = fopen(filename, "a");
-		if (!node->fp) {
-			fprintf(stderr, "unable to open file %s\n", filename);
-			return;
-		}
+		//sprintf(filename, "%s", OUTPUT_PATH);
+		//sprintf(filename, "%s%s:%d", filename, inet_ntoa(node->tuple.saddr), node->tuple.sport);
+		//sprintf(filename, "%s_%s:%d", filename, inet_ntoa(node->tuple.daddr), node->tuple.dport);
+		//sprintf(filename, "%s_%lx", filename, node->timestamp);
+		//node->fp = fopen(filename, "a");
+		//if (!node->fp) {
+		//	fprintf(stderr, "unable to open file %s\n", filename);
+		//	return;
+		//}
 
 		stream_list_add(node);
 	}
@@ -213,27 +236,49 @@ static void stream_node_update(
 	}
 
 	/* store the stream node to file */
-	RECORD(node->fp, "%d %u %u", win, length, seq);
-	if (length > 0) {
-		RECORD(node->fp, ":%u", seq + length);
+	//RECORD(node->fp, "%d %u %u", win, length, seq);
+	//if (length > 0) {
+	//	RECORD(node->fp, ":%u", seq + length);
+	//}
+	//if (flags & TH_ACK) {
+	//	RECORD(node->fp, " %u", ack);
+	//}
+	//RECORD(node->fp, "\n");
+
+	node->total_len += length;
+	node->total_frames += 1;
+
+	if (node->seq_fence <= seq) {
+		node->seq_fence = seq;
 	}
-	if (flags & TH_ACK) {
-		RECORD(node->fp, " %u", ack);
+	else {
+		node->missed_len += length;
+		node->missed_frames += 1;
 	}
-	RECORD(node->fp, "\n");
 
 handle_state:
 	/* handle the stream node state */
-	if (node->total_len >= STREAM_LEN_THRESHOLD && node->state == STREAM_RUNNING) {
-		RECORD(node->fp, "full %u\n", node->total_len);
-		fprintf(stderr, "a stream full\n");
+	if (node->total_len >= STREAM_LEN_THRESHOLD && node->state <= STREAM_RUNNING) {
+		time_t now = time(NULL);
+		//RECORD(node->fp, "full %u\n", node->total_len);
+		dump_stream_info(stdout, node);
+		fprintf(stdout, ", stream full.\n");
 		node->state = STREAM_FULL;
 	}
 
-	if (flags & TH_FIN) {
-		RECORD(node->fp, "finish %u\n", node->total_len);
-		fprintf(stderr, "a stream finish\n");
-		node->state = STREAM_CLEANUP;
+	if (flags & TH_FIN && node->state <= STREAM_FULL) {
+		//RECORD(node->fp, "finish %u\n", node->total_len);
+		if (node->total_len > 0) {
+			dump_stream_info(stdout, node);
+			if (node->state == STREAM_FULL) {
+				fprintf(stdout, ", stream full and finished.\n");
+			}
+			else {
+				fprintf(stdout, ", stream finished.\n");
+			}
+		}
+
+		node->state = STREAM_FIN;
 	}
 
 	if (node->state == STREAM_FULL) {
@@ -242,9 +287,37 @@ handle_state:
 			fclose(node->fp);
 			node->fp = NULL;
 		}
-	} else if (node->state == STREAM_CLEANUP) {
+	} else if (node->state == STREAM_FIN) {
 		stream_list_remove(node);
 	}
+}
+
+static void dump_stream_info(FILE *fp, STREAM *node)
+{
+	if (!fp || !node) {
+		return;
+	}
+
+	struct timeval now;
+	struct timeval delta;
+	gettimeofday(&now, NULL);
+
+	delta.tv_sec = now.tv_sec - node->timestamp.tv_sec;
+	delta.tv_usec = now.tv_usec - node->timestamp.tv_usec;
+	if (delta.tv_usec < 0) {
+		delta.tv_usec = SEC_IN_MICROSECONDS + delta.tv_usec;
+		delta.tv_sec -= 1;
+	}
+
+	fprintf(fp, "%s:%u", inet_ntoa(node->tuple.saddr), node->tuple.sport);
+	fprintf(fp, " -> %s:%u", inet_ntoa(node->tuple.daddr), node->tuple.dport);
+	fprintf(fp, ", missed data %u/%u, missed frames %u/%u",
+			node->missed_len, node->total_len,
+			node->missed_frames, node->total_frames);
+	fprintf(fp, ", time %ld.%ld ~ %ld.%ld (%ld.%ld)",
+			node->timestamp.tv_sec, node->timestamp.tv_usec,
+			now.tv_sec, now.tv_usec,
+			delta.tv_sec, delta.tv_usec);
 }
 
 static STREAM *stream_node_create(void)
@@ -329,6 +402,23 @@ static STREAM *stream_list_lookup_by_tuple(TUPLE *tuple)
 	}
 
 	return result;
+}
+
+static void read_config_file(void)
+{
+	FILE *fp = NULL;
+	char line[CONFIG_LEN] = {0};
+	
+	fp = fopen(CONFIG_FILE, "r");
+	if (!fp) {
+		fprintf(stderr, "unable to open config file %s\n", CONFIG_FILE);
+		return;
+	}
+
+	while (!feof(fp)) {
+		fgets(line, CONFIG_LEN, fp);
+		get_value
+	}
 }
 
 void statistic_init(void)
