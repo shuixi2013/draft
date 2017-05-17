@@ -38,10 +38,12 @@
 #define FILENAME_LEN			(50)
 #define CONFIG_LEN				(200)
 #define SEC_IN_MICROSECONDS		(1000000) /* 1 s = 10^6 us */
-#define STREAM_LEN_THRESHOLD	(256 * 1024) /* 256 kB */
-#define OUTPUT_PATH				"/tmp/statistic/"
-#define OUTPUT_SYN_FILE			OUTPUT_PATH"syn_collection"
+#define SYN_FILE				"syn_collection"
 #define CONFIG_FILE				"sos_config"
+#define TSEQ_HASHSIZE			(919)
+
+#define DEF_OUTPUT_PATH			"/tmp/statistic/"
+#define DEF_STREAM_THRESHOLD	(256 * 1024) /* 256 kB */
 
 #define RECORD(fp, ...) do { \
 	if (fp) { \
@@ -52,9 +54,12 @@
 
 typedef struct _TUPLE
 {
-	struct in_addr saddr, daddr;
-	uint16_t sport, dport;
+	struct in_addr src;
+	struct in_addr dst;
+	uint32_t port; /* sport at high 16 bit, dport at low 16 bit */
 } TUPLE;
+#define GET_SPORT(port)			(port >> 16)
+#define GET_DPORT(port)			(port & 0xFFFF)
 
 typedef enum _STREAM_STATE
 {
@@ -78,42 +83,45 @@ typedef struct _STREAM
 	struct _STREAM *next;
 } STREAM;
 
-typedef enum _CONFIG_TYPE
-{
-	CFG_OUTPUT_PATH,
-} CONFIG_TYPE;
 
-typedef struct _CONFIG_STR
+typedef struct _CONFIG_PACK
 {
 	char *key;
-	char *val;
-} CONFIG_STR;
+	void (*func)(char *val);
+} CONFIG_PACK;
 
 /********************************************************************
  * function declares
  ********************************************************************/
-static STREAM *stream_list_add(STREAM *node);
 static STREAM *stream_list_lookup_by_pointer(STREAM *node);
-static STREAM *stream_list_lookup_by_tuple(TUPLE *tuple);
-static STREAM *stream_list_remove(STREAM *node);
+static STREAM *stream_list_lookup_by_tuple(const TUPLE *tuple);
 static STREAM *stream_node_create(void);
+static int stream_list_add(STREAM *node);
+static int stream_list_remove(STREAM *node);
 static void stream_node_destroy(STREAM *node);
 static void stream_node_update(
 		struct in_addr saddr, struct in_addr daddr,
 		register const u_char *tcphdr, uint32_t length);
 static void dump_stream_info(FILE *fp, STREAM *node);
 
+static void read_config_file(void);
+static void config_func_path(char *val);
+static void config_func_threshold(char *val);
+
 
 /********************************************************************
  * global variables
  ********************************************************************/
-STREAM g_stream_head = {0};
-static FILE *g_output = NULL;
-static STREAM *g_stream_list = NULL;
+static STREAM g_stream_list_hash[TSEQ_HASHSIZE];
+static FILE *g_fp_syn = NULL;
+static char g_output_path[NAME_MAX] = {0};
+static uint32_t g_stream_threshold = 0;
 
-static CONFIG_STR g_config_str[] = {
-	{ "key",	"val" },
-}
+static CONFIG_PACK g_config_pack[] = {
+	{ "path", config_func_path }, /* output path */
+	{ "threshold", config_func_threshold }, /* stream length threshold(KB) */
+};
+#define CONFIG_PACK_SIZE (sizeof(g_config_pack)/sizeof(CONFIG_PACK))
 
 
 /********************************************************************
@@ -156,9 +164,9 @@ void statistic_cap_tcp(register const u_char *tcphdr, uint32_t length,
 
 	if (flags & TH_SYN) {
 		/* sip:sport>dip:dport win seq */
-		RECORD(g_output, "%s:%d", inet_ntoa(saddr), sport);
-		RECORD(g_output, ">%s:%d", inet_ntoa(daddr), dport);
-		RECORD(g_output, " %d %u\n", win, seq);
+		RECORD(g_fp_syn, "%s:%d", inet_ntoa(saddr), sport);
+		RECORD(g_fp_syn, ">%s:%d", inet_ntoa(daddr), dport);
+		RECORD(g_fp_syn, " %d %u\n", win, seq);
 	}
 
 	length -= TH_OFF(tp) * 4;
@@ -184,12 +192,11 @@ static void stream_node_update(
 	ack = EXTRACT_32BITS(&tp->th_ack);
 	win = EXTRACT_16BITS(&tp->th_win);
 
-	TUPLE tuple = {
-		.saddr = saddr,
-		.daddr = daddr,
-		.sport = sport,
-		.dport = dport
-	};
+	TUPLE tuple;
+
+	UNALIGNED_MEMCPY(&tuple.dst, &daddr, sizeof(daddr));
+	UNALIGNED_MEMCPY(&tuple.src, &saddr, sizeof(saddr));
+	tuple.port = sport << 16 | dport;
 
 	/* handle the stream node in memory */
 	STREAM *node = stream_list_lookup_by_tuple(&tuple);
@@ -258,7 +265,7 @@ static void stream_node_update(
 
 handle_state:
 	/* handle the stream node state */
-	if (node->total_len >= STREAM_LEN_THRESHOLD && node->state <= STREAM_RUNNING) {
+	if (node->total_len >= g_stream_threshold && node->state <= STREAM_RUNNING) {
 		time_t now = time(NULL);
 		//RECORD(node->fp, "full %u\n", node->total_len);
 		dump_stream_info(stdout, node);
@@ -309,8 +316,8 @@ static void dump_stream_info(FILE *fp, STREAM *node)
 		delta.tv_sec -= 1;
 	}
 
-	fprintf(fp, "%s:%u", inet_ntoa(node->tuple.saddr), node->tuple.sport);
-	fprintf(fp, " -> %s:%u", inet_ntoa(node->tuple.daddr), node->tuple.dport);
+	fprintf(fp, "%s:%u", inet_ntoa(node->tuple.src), GET_SPORT(node->tuple.port));
+	fprintf(fp, " -> %s:%u", inet_ntoa(node->tuple.dst), GET_DPORT(node->tuple.port));
 	fprintf(fp, ", missed data %u/%u, missed frames %u/%u",
 			node->missed_len, node->total_len,
 			node->missed_frames, node->total_frames);
@@ -343,62 +350,56 @@ static void stream_node_destroy(STREAM *node)
 	free(node);
 }
 
-static STREAM *stream_list_add(STREAM *node)
+static int stream_list_add(STREAM *node)
 {
-	STREAM *p = g_stream_list;
-	while (p->next) {
-		p = p->next;
-	}
-	p->next = node;
+	register STREAM *p;
 
-	return g_stream_list;
+	for (p = &g_stream_list_hash[node->tuple.port % TSEQ_HASHSIZE];
+			p->next; p = p->next) {
+		if (memcmp((char *)&(node->tuple), &(p->next->tuple),
+					sizeof(TUPLE)) == 0) {
+			return ERR;
+		}
+	}
+
+	if (!p->next) {
+		p->next = node;
+	}
+
+	return OK;
 }
 
-static STREAM *stream_list_remove(STREAM *node)
+static int stream_list_remove(STREAM *node)
 {
 	STREAM *pre;
 	STREAM *next;
 
-	pre = stream_list_lookup_by_pointer(node);
-	next = node->next;
+	pre = stream_list_lookup_by_tuple(&node->tuple);
+	if (!pre) {
+		return ERR;
+	}
 
+	next = node->next;
 	pre->next = next;
 
 	stream_node_destroy(node);
 
-	return g_stream_list;
-}
-
-/* do not check member */
-/* return the parent's pointer */
-static STREAM *stream_list_lookup_by_pointer(STREAM *node)
-{
-	STREAM *p = g_stream_list;
-	STREAM *result = NULL;
-
-	while (p->next) {
-		if (node == p->next) {
-			result = p;
-			break;
-		}
-		p = p->next;
-	}
-
-	return result;
+	return OK;
 }
 
 /* return the parent's pointer */
-static STREAM *stream_list_lookup_by_tuple(TUPLE *tuple)
+static STREAM *stream_list_lookup_by_tuple(const TUPLE *tuple)
 {
-	STREAM *p = g_stream_list;
+	register STREAM *node;
 	STREAM *result = NULL;
 
-	while (p->next) {
-		if (memcmp(tuple, &(p->next->tuple), sizeof(TUPLE)) == 0) {
-			result = p;
+	for (node = &g_stream_list_hash[tuple->port % TSEQ_HASHSIZE];
+			node->next; node = node->next) {
+		if (memcmp((char *)tuple, (char *)&node->next->tuple,
+					sizeof(TUPLE)) == 0) {
+			result = node;
 			break;
 		}
-		p = p->next;
 	}
 
 	return result;
@@ -408,7 +409,10 @@ static void read_config_file(void)
 {
 	FILE *fp = NULL;
 	char line[CONFIG_LEN] = {0};
-	
+	char key[CONFIG_LEN];
+	char val[CONFIG_LEN];
+	char *p;
+
 	fp = fopen(CONFIG_FILE, "r");
 	if (!fp) {
 		fprintf(stderr, "unable to open config file %s\n", CONFIG_FILE);
@@ -416,39 +420,86 @@ static void read_config_file(void)
 	}
 
 	while (!feof(fp)) {
-		fgets(line, CONFIG_LEN, fp);
-		get_value
+		memset(key, 0, CONFIG_LEN);
+		memset(val, 0, CONFIG_LEN);
+
+		if (fgets(line, CONFIG_LEN, fp) == NULL) {
+			continue;
+		}
+
+		p = strstr(line, "=");
+		strncpy(key, line, p - line);
+		strncpy(val, p + 1, strlen(p + 1) - 1);
+
+		for (int i = 0; i < CONFIG_PACK_SIZE; i++) {
+			if (strcmp(key, g_config_pack[i].key) == 0) {
+				g_config_pack[i].func(val);
+			}
+		}
+	}
+}
+
+static void config_func_path(char *val)
+{
+	if (val) {
+		strncpy(g_output_path, val, NAME_MAX);
+		fprintf(stderr, "Set output path: \"%s\"\n", g_output_path);
+	}
+}
+
+static void config_func_threshold(char *val)
+{
+	if (val) {
+		g_stream_threshold = atoi(val);
+		fprintf(stderr, "Set stream threshold: %d KB\n", g_stream_threshold);
+		g_stream_threshold *= 1024;
 	}
 }
 
 void statistic_init(void)
 {
-	mkdir(OUTPUT_PATH, 0775);
-	if (!g_output) {
-		g_output = fopen(OUTPUT_SYN_FILE, "a");
-		if (!g_output) {
-			fprintf(stderr, "unable to open file %s\n", OUTPUT_SYN_FILE);
+	read_config_file();
+
+	if (g_output_path[0] == 0) {
+		strncpy(g_output_path, DEF_OUTPUT_PATH, NAME_MAX);
+		fprintf(stderr, "Set output path to default: \"%s\"\n", g_output_path);
+	}
+	if (!g_fp_syn) {
+		char syn_path[NAME_MAX] = {0};
+		mkdir(g_output_path, 0775);
+		snprintf(syn_path, NAME_MAX, "%s%s", g_output_path, SYN_FILE);
+		g_fp_syn = fopen(syn_path, "a");
+		if (!g_fp_syn) {
+			fprintf(stderr, "unable to open file %s\n", syn_path);
 			return;
 		}
 	}
 
-	g_stream_list = &g_stream_head;
+	if (g_stream_threshold == 0) {
+		g_stream_threshold = DEF_STREAM_THRESHOLD;
+		fprintf(stderr, "Set stream threshold to default: %d KB\n", DEF_STREAM_THRESHOLD / 1024);
+	}
 }
 
 void statistic_exit(void)
 {
-	if (g_output) {
-		fflush(g_output);
-		fclose(g_output);
-		g_output = NULL;
+	if (g_fp_syn) {
+		fflush(g_fp_syn);
+		fclose(g_fp_syn);
+		g_fp_syn = NULL;
 	}
 
-	STREAM *p = g_stream_list;
-	STREAM *next = p->next;
-	while (next) {
-		p = next;
+	STREAM *p;
+	STREAM *next;
+	for (int i = 0; i < TSEQ_HASHSIZE; i++) {
+		p = &g_stream_list_hash[i];
 		next = p->next;
 
-		stream_node_destroy(p);
+		while (next) {
+			p = next;
+			next = p->next;
+
+			stream_node_destroy(p);
+		}
 	}
 }
