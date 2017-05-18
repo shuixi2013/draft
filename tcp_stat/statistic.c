@@ -38,11 +38,15 @@
 #define FILENAME_LEN			(50)
 #define CONFIG_LEN				(200)
 #define SEC_IN_MICROSECONDS		(1000000) /* 1 s = 10^6 us */
-#define SYN_FILE				"syn_collection"
+#define WINDOW_FILE				"window.out"
+#define STREAM_FILE				"stream.out"
 #define CONFIG_FILE				"sos_config"
 #define TSEQ_HASHSIZE			(919)
+#define CONN_POOL_SIZE			(10)
+#define TRASH_FRAME_THRESHOLD	(200)
+#define TRASH_TIME_THRESHOLD	(5) /* 5 s */
 
-#define DEF_OUTPUT_PATH			"/tmp/statistic/"
+#define DEF_OUTPUT_PATH			"/tmp/sos/"
 #define DEF_STREAM_THRESHOLD	(256 * 1024) /* 256 kB */
 
 #define RECORD(fp, ...) do { \
@@ -51,12 +55,13 @@
 	} \
 } while (0)
 
+//#define DEBUG 1
 
 typedef struct _TUPLE
 {
 	struct in_addr src;
 	struct in_addr dst;
-	uint32_t port; /* sport at high 16 bit, dport at low 16 bit */
+	uint32_t port;
 } TUPLE;
 #define GET_SPORT(port)			(port >> 16)
 #define GET_DPORT(port)			(port & 0xFFFF)
@@ -73,12 +78,12 @@ typedef struct _STREAM
 {
 	TUPLE tuple;
 	struct timeval timestamp;
-	FILE *fp;
-	uint32_t seq_fence;
-	uint32_t missed_len; /* TCP payload only */
-	uint32_t total_len; /* TCP payload only */
-	uint32_t missed_frames;
-	uint32_t total_frames;
+	uint32_t seq_fence[2];
+	uint32_t isn[2];
+	//uint32_t missed_len[2]; /* TCP payload only */
+	//uint32_t total_len[2]; /* TCP payload only */
+	uint32_t missed_frames[2];
+	uint32_t total_frames[2];
 	STREAM_STATE state;
 	struct _STREAM *next;
 } STREAM;
@@ -93,15 +98,10 @@ typedef struct _CONFIG_PACK
 /********************************************************************
  * function declares
  ********************************************************************/
-static STREAM *stream_list_lookup_by_pointer(STREAM *node);
 static STREAM *stream_list_lookup_by_tuple(const TUPLE *tuple);
 static STREAM *stream_node_create(void);
-static int stream_list_add(STREAM *node);
-static int stream_list_remove(STREAM *node);
+static int stream_list_remove_subnode(STREAM *node);
 static void stream_node_destroy(STREAM *node);
-static void stream_node_update(
-		struct in_addr saddr, struct in_addr daddr,
-		register const u_char *tcphdr, uint32_t length);
 static void dump_stream_info(FILE *fp, STREAM *node);
 
 static void read_config_file(void);
@@ -113,9 +113,13 @@ static void config_func_threshold(char *val);
  * global variables
  ********************************************************************/
 static STREAM g_stream_list_hash[TSEQ_HASHSIZE];
-static FILE *g_fp_syn = NULL;
-static char g_output_path[NAME_MAX] = {0};
+static FILE *g_window_fp = NULL;
+static FILE *g_stream_fp = NULL;
+static char g_out_path[NAME_MAX] = {0};
 static uint32_t g_stream_threshold = 0;
+static uint32_t g_conn_cnt = 0;
+static uint32_t g_conn_del_cnt = 0;
+static uint32_t g_conn_cnt_max = 200;
 
 static CONFIG_PACK g_config_pack[] = {
 	{ "path", config_func_path }, /* output path */
@@ -164,138 +168,134 @@ void statistic_cap_tcp(register const u_char *tcphdr, uint32_t length,
 
 	if (flags & TH_SYN) {
 		/* sip:sport>dip:dport win seq */
-		RECORD(g_fp_syn, "%s:%d", inet_ntoa(saddr), sport);
-		RECORD(g_fp_syn, ">%s:%d", inet_ntoa(daddr), dport);
-		RECORD(g_fp_syn, " %d %u\n", win, seq);
+		RECORD(g_window_fp, "%s:%d", inet_ntoa(saddr), sport);
+		RECORD(g_window_fp, ">%s:%d", inet_ntoa(daddr), dport);
+		RECORD(g_window_fp, " %d %u\n", win, seq);
 	}
 
-	length -= TH_OFF(tp) * 4;
-	stream_node_update(saddr, daddr, tcphdr, length);
-}
+	//length -= TH_OFF(tp) * 4;
 
-static void stream_node_update(
-		struct in_addr saddr, struct in_addr daddr,
-		register const u_char *tcphdr, uint32_t length)
-{
-	register const struct tcphdr *tp;
-	register u_char flags;
-	uint16_t sport, dport, win, urp;
-	uint32_t seq, ack, thseq, thack;
+	if (!(flags & TH_ACK)) {
+		return;
+	}
 
-	tp = (const struct tcphdr *)tcphdr;
-
-	flags = tp->th_flags;
-	sport = EXTRACT_16BITS(&tp->th_sport);
-	dport = EXTRACT_16BITS(&tp->th_dport);
-
-	seq = EXTRACT_32BITS(&tp->th_seq);
-	ack = EXTRACT_32BITS(&tp->th_ack);
-	win = EXTRACT_16BITS(&tp->th_win);
-
+	STREAM *parent;
+	register STREAM *node;
+	register int rev;
 	TUPLE tuple;
 
-	UNALIGNED_MEMCPY(&tuple.dst, &daddr, sizeof(daddr));
-	UNALIGNED_MEMCPY(&tuple.src, &saddr, sizeof(saddr));
-	tuple.port = sport << 16 | dport;
+	rev = 0;
+	if (sport > dport) {
+		rev = 1;
+	} else if (sport == dport) {
+		if (UNALIGNED_MEMCMP(&saddr, &daddr, sizeof(daddr)) > 0) {
+			rev = 1;
+		}
+	}
 
-	/* handle the stream node in memory */
-	STREAM *node = stream_list_lookup_by_tuple(&tuple);
-	if (node) {
-		/* get this node self */
+	if (rev) {
+		UNALIGNED_MEMCPY(&tuple.src, &daddr, sizeof(daddr));
+		UNALIGNED_MEMCPY(&tuple.dst, &saddr, sizeof(saddr));
+		tuple.port = dport << 16 | sport;
+	} else {
+		UNALIGNED_MEMCPY(&tuple.dst, &daddr, sizeof(daddr));
+		UNALIGNED_MEMCPY(&tuple.src, &saddr, sizeof(saddr));
+		tuple.port = sport << 16 | dport;
+	}
+
+	int cnt = 0;
+
+	for (node = &g_stream_list_hash[tuple.port % TSEQ_HASHSIZE];
+			node->next; node = node->next) {
+		cnt++;
+		if (memcmp((char *)&tuple, (char *)&node->next->tuple,
+					sizeof(TUPLE)) == 0) {
+			break;
+		}
+	}
+
+	parent = node;
+	if (node->next) {
 		node = node->next;
 
-	} else {
-		char filename[NAME_MAX] = {0};
-		node = stream_node_create();
-		if (!node) {
+	} else if (flags & TH_SYN) {
+		if (cnt > CONN_POOL_SIZE) {
+			//fprintf(stderr, "conn pool full: %u\n", node->tuple.port);
 			return;
 		}
 
+		node->next = (STREAM *)calloc(1, sizeof(STREAM));
+		if (!node->next) {
+			fprintf(stderr, "create stream node failed\n");
+			return;
+		}
+
+#ifdef DEBUG
+		g_conn_cnt += 1;
+#endif
+		node = node->next;
 		memcpy(&node->tuple, &tuple, sizeof(TUPLE));
 		gettimeofday(&node->timestamp, NULL);
-		node->seq_fence = seq;
-		node->missed_len = 0;
-		node->missed_frames = 0;
-		node->total_len = 0;
-		node->total_frames = 0;
+		node->isn[rev] = node->seq_fence[rev] = seq;
+		node->isn[!rev] = node->seq_fence[!rev] = ack - 1;
 		node->state = STREAM_RUNNING;
-		node->next = NULL;
-		node->fp = NULL;
-		/*
-		 * store the tuple info to file name asume
-		 * file name: sip-sport_dip-dport_timestamp
-		 */
-		//sprintf(filename, "%s", OUTPUT_PATH);
-		//sprintf(filename, "%s%s:%d", filename, inet_ntoa(node->tuple.saddr), node->tuple.sport);
-		//sprintf(filename, "%s_%s:%d", filename, inet_ntoa(node->tuple.daddr), node->tuple.dport);
-		//sprintf(filename, "%s_%lx", filename, node->timestamp);
-		//node->fp = fopen(filename, "a");
-		//if (!node->fp) {
-		//	fprintf(stderr, "unable to open file %s\n", filename);
-		//	return;
-		//}
+	} else {
+		return;
+	}
 
-		stream_list_add(node);
+#ifdef DEBUG
+	if (g_conn_cnt > g_conn_cnt_max) {
+		g_conn_cnt_max = g_conn_cnt;
+		if (g_conn_cnt_max % 100 == 0) {
+			fprintf(stderr, "conn: %u\n", g_conn_cnt_max);
+		}
+	}
+#endif
+
+	if (flags & TH_FIN) {
+		node->state = STREAM_FIN;
 	}
 
 	if (node->state >= STREAM_FULL) {
 		goto handle_state;
 	}
 
-	/* store the stream node to file */
-	//RECORD(node->fp, "%d %u %u", win, length, seq);
-	//if (length > 0) {
-	//	RECORD(node->fp, ":%u", seq + length);
-	//}
-	//if (flags & TH_ACK) {
-	//	RECORD(node->fp, " %u", ack);
-	//}
-	//RECORD(node->fp, "\n");
-
-	node->total_len += length;
-	node->total_frames += 1;
-
-	if (node->seq_fence <= seq) {
-		node->seq_fence = seq;
-	}
-	else {
-		node->missed_len += length;
-		node->missed_frames += 1;
-	}
-
-handle_state:
-	/* handle the stream node state */
-	if (node->total_len >= g_stream_threshold && node->state <= STREAM_RUNNING) {
-		time_t now = time(NULL);
-		//RECORD(node->fp, "full %u\n", node->total_len);
-		dump_stream_info(stdout, node);
-		fprintf(stdout, ", stream full.\n");
-		node->state = STREAM_FULL;
-	}
-
-	if (flags & TH_FIN && node->state <= STREAM_FULL) {
-		//RECORD(node->fp, "finish %u\n", node->total_len);
-		if (node->total_len > 0) {
-			dump_stream_info(stdout, node);
-			if (node->state == STREAM_FULL) {
-				fprintf(stdout, ", stream full and finished.\n");
-			}
-			else {
-				fprintf(stdout, ", stream finished.\n");
-			}
-		}
-
+	//node->total_len[rev] += length;
+	node->total_frames[rev] += 1;
+	if (node->total_frames[rev] > TRASH_FRAME_THRESHOLD) {
 		node->state = STREAM_FIN;
 	}
 
-	if (node->state == STREAM_FULL) {
-		if (node->fp) {
-			fflush(node->fp);
-			fclose(node->fp);
-			node->fp = NULL;
-		}
-	} else if (node->state == STREAM_FIN) {
-		stream_list_remove(node);
+	struct timeval now;
+	gettimeofday(&now, NULL);
+	if (now.tv_sec > node->timestamp.tv_sec + TRASH_TIME_THRESHOLD) {
+		node->state = STREAM_FIN;
+	}
+
+	if (node->seq_fence[rev] <= seq) {
+		node->seq_fence[rev] = seq;
+	}
+	else {
+		//node->missed_len[rev] += length;
+		node->missed_frames[rev] += 1;
+	}
+
+	/* stream full */
+	if (ack > node->isn[!rev] + g_stream_threshold) {
+		dump_stream_info(g_stream_fp, node);
+		node->state = STREAM_FULL;
+	}
+
+handle_state:
+	if (node->state >= STREAM_FULL) {
+		stream_list_remove_subnode(parent);
+#ifdef DEBUG
+		g_conn_cnt -= 1;
+		//g_conn_del_cnt += 1;
+		//if (g_conn_del_cnt % 500 == 0) {
+		//	fprintf(stderr, "del conn: %u\n", g_conn_del_cnt);
+		//}
+#endif
 	}
 }
 
@@ -316,72 +316,41 @@ static void dump_stream_info(FILE *fp, STREAM *node)
 		delta.tv_sec -= 1;
 	}
 
-	fprintf(fp, "%s:%u", inet_ntoa(node->tuple.src), GET_SPORT(node->tuple.port));
-	fprintf(fp, " -> %s:%u", inet_ntoa(node->tuple.dst), GET_DPORT(node->tuple.port));
-	fprintf(fp, ", missed data %u/%u, missed frames %u/%u",
-			node->missed_len, node->total_len,
-			node->missed_frames, node->total_frames);
-	fprintf(fp, ", time %ld.%ld ~ %ld.%ld (%ld.%ld)",
-			node->timestamp.tv_sec, node->timestamp.tv_usec,
-			now.tv_sec, now.tv_usec,
+	char buf[150] = {0};
+	char *p = buf;
+	p += sprintf(p, "%s:%u", inet_ntoa(node->tuple.src), GET_SPORT(node->tuple.port));
+	p += sprintf(p, " %s:%u", inet_ntoa(node->tuple.dst), GET_DPORT(node->tuple.port));
+	sprintf(p, " %u/%u %u/%u %ld.%ld\n",
+			node->missed_frames[0], node->total_frames[0],
+			node->missed_frames[1], node->total_frames[1],
 			delta.tv_sec, delta.tv_usec);
+
+	fprintf(fp, "%s", buf);
+	//fprintf(fp, "%s:%u", inet_ntoa(node->tuple.src), GET_SPORT(node->tuple.port));
+	//fprintf(fp, " %s:%u", inet_ntoa(node->tuple.dst), GET_DPORT(node->tuple.port));
+	//fprintf(fp, " %u/%u %u/%u %ld.%ld\n",
+	//		node->missed_frames[0], node->total_frames[0],
+	//		node->missed_frames[1], node->total_frames[1],
+	//		delta.tv_sec, delta.tv_usec);
 }
 
 static STREAM *stream_node_create(void)
 {
-	STREAM *stream = (STREAM *)malloc(sizeof(STREAM));
-	if (!stream) {
-		fprintf(stderr, "create stream node failed\n");
-		return NULL;
-	}
-	memset(stream, 0, sizeof(STREAM));
-
-	return stream;
 }
 
 static void stream_node_destroy(STREAM *node)
 {
-	if (node->fp) {
-		fflush(node->fp);
-		fclose(node->fp);
-		node->fp = NULL;
-	}
-
 	free(node);
 }
 
-static int stream_list_add(STREAM *node)
+static int stream_list_remove_subnode(STREAM *parent)
 {
-	register STREAM *p;
-
-	for (p = &g_stream_list_hash[node->tuple.port % TSEQ_HASHSIZE];
-			p->next; p = p->next) {
-		if (memcmp((char *)&(node->tuple), &(p->next->tuple),
-					sizeof(TUPLE)) == 0) {
-			return ERR;
-		}
-	}
-
-	if (!p->next) {
-		p->next = node;
-	}
-
-	return OK;
-}
-
-static int stream_list_remove(STREAM *node)
-{
-	STREAM *pre;
-	STREAM *next;
-
-	pre = stream_list_lookup_by_tuple(&node->tuple);
-	if (!pre) {
+	if (!parent || !parent->next) {
 		return ERR;
 	}
 
-	next = node->next;
-	pre->next = next;
-
+	STREAM *node = parent->next;
+	parent->next = node->next;
 	stream_node_destroy(node);
 
 	return OK;
@@ -391,18 +360,9 @@ static int stream_list_remove(STREAM *node)
 static STREAM *stream_list_lookup_by_tuple(const TUPLE *tuple)
 {
 	register STREAM *node;
-	STREAM *result = NULL;
 
-	for (node = &g_stream_list_hash[tuple->port % TSEQ_HASHSIZE];
-			node->next; node = node->next) {
-		if (memcmp((char *)tuple, (char *)&node->next->tuple,
-					sizeof(TUPLE)) == 0) {
-			result = node;
-			break;
-		}
-	}
 
-	return result;
+	return node;
 }
 
 static void read_config_file(void)
@@ -442,8 +402,8 @@ static void read_config_file(void)
 static void config_func_path(char *val)
 {
 	if (val) {
-		strncpy(g_output_path, val, NAME_MAX);
-		fprintf(stderr, "Set output path: \"%s\"\n", g_output_path);
+		strncpy(g_out_path, val, NAME_MAX);
+		fprintf(stderr, "Set output path: \"%s\"\n", g_out_path);
 	}
 }
 
@@ -458,19 +418,32 @@ static void config_func_threshold(char *val)
 
 void statistic_init(void)
 {
+	char file_path[NAME_MAX] = {0};
+
 	read_config_file();
 
-	if (g_output_path[0] == 0) {
-		strncpy(g_output_path, DEF_OUTPUT_PATH, NAME_MAX);
-		fprintf(stderr, "Set output path to default: \"%s\"\n", g_output_path);
+	if (g_out_path[0] == 0) {
+		strncpy(g_out_path, DEF_OUTPUT_PATH, NAME_MAX);
+		fprintf(stderr, "Set output path to default: \"%s\"\n", g_out_path);
 	}
-	if (!g_fp_syn) {
-		char syn_path[NAME_MAX] = {0};
-		mkdir(g_output_path, 0775);
-		snprintf(syn_path, NAME_MAX, "%s%s", g_output_path, SYN_FILE);
-		g_fp_syn = fopen(syn_path, "a");
-		if (!g_fp_syn) {
-			fprintf(stderr, "unable to open file %s\n", syn_path);
+	mkdir(g_out_path, 0775);
+
+	if (!g_window_fp) {
+		memset(file_path, 0, NAME_MAX);
+		snprintf(file_path, NAME_MAX, "%s/%s", g_out_path, WINDOW_FILE);
+		g_window_fp = fopen(file_path, "a");
+		if (!g_window_fp) {
+			fprintf(stderr, "unable to open file %s\n", file_path);
+			return;
+		}
+	}
+
+	if (!g_stream_fp) {
+		memset(file_path, 0, NAME_MAX);
+		snprintf(file_path, NAME_MAX, "%s/%s", g_out_path, STREAM_FILE);
+		g_stream_fp = fopen(file_path, "a");
+		if (!g_stream_fp) {
+			fprintf(stderr, "unable to open file %s\n", file_path);
 			return;
 		}
 	}
@@ -483,10 +456,16 @@ void statistic_init(void)
 
 void statistic_exit(void)
 {
-	if (g_fp_syn) {
-		fflush(g_fp_syn);
-		fclose(g_fp_syn);
-		g_fp_syn = NULL;
+	if (g_window_fp) {
+		fflush(g_window_fp);
+		fclose(g_window_fp);
+		g_window_fp = NULL;
+	}
+
+	if (g_stream_fp) {
+		fflush(g_stream_fp);
+		fclose(g_stream_fp);
+		g_stream_fp = NULL;
 	}
 
 	STREAM *p;
